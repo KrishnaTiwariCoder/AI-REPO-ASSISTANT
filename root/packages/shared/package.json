@@ -4,12 +4,15 @@
   "description": "",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "type":"commonjs",
+  "type": "commonjs",
   "scripts": {
-    "build":"tsc -b",
-    "start":"node dist/index.js"
+    "build": "tsc -b",
+    "start": "node dist/index.js"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
 }

@@ -2,15 +2,16 @@
 CREATE TABLE repos (
   id TEXT PRIMARY KEY,
   url TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending', -- pending | ready | failed
+  status TEXT NOT NULL DEFAULT 'pending', 
   size_bytes INTEGER,
+  last_commit_sha TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
 CREATE TABLE jobs (
   id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL REFERENCES repos(id),
-  status TEXT NOT NULL DEFAULT 'queued', -- queued|cloning|parsing|indexing|done|failed
+  status TEXT NOT NULL DEFAULT 'queued', 
   progress_pct INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   files_parsed INTEGER DEFAULT 0,
@@ -25,6 +26,7 @@ CREATE TABLE files (
   id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL REFERENCES repos(id),
   path TEXT NOT NULL,
+  content TEXT NOT NULL,
   hash TEXT NOT NULL
 );
 
@@ -32,7 +34,7 @@ CREATE TABLE symbols (
   id TEXT PRIMARY KEY,
   file_id TEXT NOT NULL REFERENCES files(id),
   name TEXT NOT NULL,
-  kind TEXT NOT NULL,         
+  kind TEXT NOT NULL,      
   line_start INTEGER NOT NULL,
   line_end INTEGER NOT NULL,
   signature TEXT,
@@ -43,7 +45,7 @@ CREATE TABLE edges (
   id TEXT PRIMARY KEY,
   from_symbol_id TEXT NOT NULL REFERENCES symbols(id),
   to_symbol_id TEXT NOT NULL REFERENCES symbols(id),
-  edge_type TEXT NOT NULL     
+  edge_type TEXT NOT NULL   
 );
 
 CREATE TABLE cache (
@@ -52,8 +54,8 @@ CREATE TABLE cache (
   query_normalized TEXT NOT NULL,
   query_original TEXT NOT NULL,
   answer TEXT NOT NULL,
-  source_symbol_ids TEXT,     
-  source_file_hashes TEXT,    
+  source_symbol_ids TEXT,
+  source_file_hashes TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

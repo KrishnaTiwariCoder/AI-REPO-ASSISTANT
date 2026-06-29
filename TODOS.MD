@@ -44,12 +44,14 @@ feat: SQLite schema for jobs, symbols, edges, cache, eval results
 feat: submit a public repo URL, validate before cloning
 ```
 
-- [ ] `POST /api/v1/repos` — accepts a GitHub repo URL
-- [ ] Validate URL format (public GitHub repo, not arbitrary git URL, for v1)
-- [ ] Call GitHub API to check repo exists and read `size` field
-- [ ] Reject with clear error if `size` exceeds `MAX_REPO_SIZE_MB`
-- [ ] Insert `repos` row (`status: 'pending'`) and `jobs` row (`status: 'queued'`)
-- [ ] Return `{ repoId, jobId }` to the client immediately (non-blocking)
+- [x] `POST /api/v1/repos` — accepts a GitHub repo URL
+- [x] Validate URL format (public GitHub repo, not arbitrary git URL, for v1)
+- [x] Call GitHub API to check repo exists, read `size`, `default_branch`, and `private` fields
+- [x] Reject with clear error if `private` is true (OAuth deferred to v2)
+- [x] Reject with clear error if `size` exceeds `MAX_REPO_SIZE_MB`
+- [x] Fetch the latest commit SHA for `default_branch` via the GitHub API (`GET /repos/:owner/:repo/commits/:branch`) — no clone needed for this, it's available at submission time
+- [x] Insert `repos` row (`status: 'pending'`, `last_commit_sha` already populated from the call above) and `jobs` row (`status: 'queued'`)
+- [x] Return `{ repoId, jobId }` to the client immediately (non-blocking)
 
 ---
 
@@ -60,7 +62,7 @@ feat: shallow clone repo to temp dir, guaranteed cleanup after indexing
 ```
 
 - [ ] `git clone --depth 1 <url> <tmp-dir>` via `execa`
-- [ ] Read the latest commit SHA from the fresh clone (`git rev-parse HEAD`), store on `repos.last_commit_sha` once indexing completes — needed later for refresh comparisons
+- [ ] No need to read the commit SHA here — it was already fetched and stored on `repos.last_commit_sha` during `v0.3.0`, via the GitHub API rather than `git rev-parse`
 - [ ] Update `jobs.status = 'cloning'`, `progress_pct` accordingly
 - [ ] Handle clone failures (private repo, repo not found, network error) → `jobs.status = 'failed'`, store `error`
 - [ ] Guarantee temp directory deletion after parsing — even on failure (try/finally)
@@ -122,7 +124,6 @@ feat: finalize indexing job, delete cloned source
 
 - [ ] Delete the cloned temp directory once graph extraction is complete
 - [ ] Record `duration_ms` on the `jobs` row (total time from `queued` to `done`)
-- [ ] Persist `repos.last_commit_sha` (captured back in v0.4.0) now that indexing has actually succeeded
 - [ ] Update `jobs.status = 'done'`, `progress_pct = 100`
 - [ ] Update `repos.status = 'ready'`
 - [ ] `GET /api/v1/jobs/:jobId` — returns current status + progress + metrics for polling
