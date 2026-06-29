@@ -1,4 +1,4 @@
-# ai-repo-assistant — Agentic Codebase Assistant
+# AI-Repo-Assistant — Agentic Codebase Assistant
 
 > Paste a public GitHub repo URL, watch it get indexed into a structural code graph, then chat with an assistant that actually understands your codebase — no embeddings, no vector DB, just deterministic lexical + graph-traversal retrieval feeding an LLM.
 
@@ -29,21 +29,29 @@ The platform is a **TurboRepo monorepo** with `apps/web` (Next.js), `apps/backen
 Client (Next.js + TypeScript)
         │
         ├── HTTP REST ──────────────► Hono API Server ◄──── SQLite
-        │   (submit repo, poll job,            │              (jobs, symbols,
-        │    chat)                             │               edges, cache,
+        │   (submit/refresh repo,              │              (jobs, files+content,
+        │    poll job, chat)                   │               symbols, edges, cache,
         │                                      │               eval results)
         │                                      │
         │                              Indexing Pipeline
         │                              ├── Ephemeral shallow clone
         │                              ├── tree-sitter parse (2-pass)
+        │                              ├── Store file content + hash
         │                              ├── Symbol/edge graph builder
-        │                              └── Delete clone, keep graph
+        │                              └── Delete clone, keep graph+content
+        │
+        │                              Refresh Pipeline (re-submit)
+        │                              ├── Check latest commit SHA vs stored
+        │                              ├── If changed: re-clone, hash each file
+        │                              ├── Re-parse only changed-hash files
+        │                              └── Unchanged files left untouched
         │
         └── Chat ───────────────────► LangGraph Agent
             (ask question)              ├── Cache lookup (hash-validated)
                                          ├── Lexical search (SQLite, indexed)
                                          ├── Candidate ranking
                                          ├── Graph traversal expansion
+                                         ├── Slice source lines from files.content
                                          ├── LLM synthesis (only here)
                                          └── Write-through to cache
 ```
@@ -56,7 +64,13 @@ Client (Next.js + TypeScript)
 
 **Symbol resolution is two-pass.** Pass 1 walks every file and collects all symbols into the `symbols` table. Pass 2 resolves call sites and imports into `edges`, now that every symbol in the repo — regardless of which file or how far below its usage it's defined — already exists in the table. Single-pass resolution would silently miss edges where a symbol is used before (or in a different file from) where it's defined, quietly degrading retrieval quality in a way that's hard to trace back to its cause.
 
-**Clone is ephemeral, shallow, and size-capped.** Repos are never persisted on disk after indexing. `git clone --depth 1` pulls a snapshot only (no history), the repo size is checked against GitHub's API before cloning (reject if over a configurable cap), and the cloned directory is deleted immediately after the symbol graph is extracted. Only the graph (rows in SQLite) survives — not the source tree.
+**Full file text is stored, not just symbol metadata.** `symbols` only ever stores *coordinates* into a file (`line_start`/`line_end`, signature, docstring) — never the function body itself. Without the actual source text stored somewhere, there would be nothing to hand the LLM when a question requires reading real code (e.g. "why doesn't `getUser` work"). So `files.content` stores each file's full raw text, once per file, captured during indexing while the clone still exists on disk. At retrieval time, a symbol's `line_start`/`line_end` is used to slice the exact lines needed out of `files.content` — the content is never searched directly, only fetched by `file_id` and sliced by line range once `symbols` has already identified *where* to look. This keeps storage proportional to the repo's actual source size (cheap, plain text) rather than duplicating overlapping snippets across every symbol row.
+
+**Hashing detects change; it does not store content.** A hash (SHA-256) is a one-way fingerprint — fixed-length output regardless of input size, and never reversible back into the original text. Its only job in this system is answering "is this file the same as before, or different?" via direct comparison of two hash strings. It cannot substitute for storing `files.content`, since the original content can never be reconstructed from a hash. Hashes and stored content solve two different problems and both are required.
+
+**Clone is ephemeral, shallow, and size-capped.** Repos are never persisted on disk after indexing. `git clone --depth 1` pulls a snapshot only (no history), the repo size is checked against GitHub's API before cloning (reject if over a configurable cap), and the cloned directory is deleted immediately after the symbol graph is extracted. Note: it's specifically the git working directory (`.git`, build artifacts, `node_modules`, etc.) that's discarded — the plain text of each source file is retained in `files.content`, since that's required for the LLM to answer questions about real code (see above). Only the graph plus file contents (rows in SQLite) survive — not the raw git checkout.
+
+**Refreshing a repo re-indexes only what changed.** Re-submitting an already-indexed repo (a "Refresh" action) first checks the latest commit SHA via GitHub's API against `repos.last_commit_sha`. If unchanged, nothing happens — no re-clone needed. If changed, the repo is re-cloned and each file's freshly computed hash is compared against its stored `files.hash`: only files whose hash differs are re-parsed and have their symbols/edges rebuilt; unchanged files are left untouched. This makes "refresh" proportional to how much of the repo actually changed, not a full from-scratch re-index every time.
 
 **Indexing is a background job, not a blocking request.** Submitting a repo returns a `job_id` immediately. A `jobs` table in SQLite tracks `status` (queued → cloning → parsing → indexing → done/failed) and `progress_pct`. The frontend polls for status and renders progress. No external queue/worker infra in v1 — see [v2 Roadmap](#v2-roadmap-deferred-scope) for Redis + BullMQ.
 
@@ -76,11 +90,14 @@ Client (Next.js + TypeScript)
 - Pre-clone size check against GitHub API; reject oversized repos with a clear message
 - Ephemeral shallow clone (`--depth 1`), deleted immediately after parsing
 - tree-sitter-based two-pass parsing into a symbol table (functions, classes, methods, imports) — pass 1 collects symbols, pass 2 resolves edges
+- Full file text stored per file (`files.content`), captured during indexing while the clone exists, so retrieval can later slice real source code, not just symbol metadata
+- Per-file content hash stored alongside content, computed during indexing
 - Call-graph and import-graph edge extraction between symbols
 - Per-symbol docstring/leading-comment capture alongside signature
 - Background job with live status (`queued` → `cloning` → `parsing` → `indexing` → `done`/`failed`)
 - Indexing metrics captured per job (files parsed, symbol count, edge count, duration)
 - Polling-based progress UI, no page refresh needed
+- **Refresh repo** action: checks the latest commit SHA via GitHub API; if changed, re-clones and re-hashes each file, re-parsing only files whose hash actually differs from what's stored
 
 ### Chat / Q&A
 
@@ -89,6 +106,7 @@ Client (Next.js + TypeScript)
 - Lexical search against indexed `symbols`/`files` tables (no filesystem access — the clone is already gone by this point)
 - Candidate ranking (exact name match > partial match > path match) before traversal
 - Graph traversal expands from top-ranked candidates (callers, callees, related imports) to assemble context
+- Real source snippets sliced from `files.content` using each symbol's `line_start`/`line_end`, not just signatures/docstrings, so the LLM can reason about actual code behavior
 - Context + question sent to an LLM via a LangGraph agent (Plan → Retrieve → Reflect → Synthesize)
 - Response includes which files/symbols were used, for transparency
 - Repeated/similar questions served from cache when the underlying files haven't changed
@@ -147,15 +165,30 @@ Client (Next.js + TypeScript)
 ## Indexing Pipeline
 
 1. **Validate** — Check the repo exists via GitHub API; check `size` field against a configured cap (e.g. 200MB); reject early if too large.
-2. **Clone** — `git clone --depth 1 <url> <tmp-dir>`. Shallow clone only — no history needed for structural indexing.
-3. **Parse (pass 1 — collect symbols)** — Walk the cloned tree, parse each source file with `web-tree-sitter`, and record every function, class, method, top-level variable, and import/export — with file path, line range, signature, and docstring/leading comment — into the `symbols` table. Don't resolve any references yet.
-4. **Parse (pass 2 — resolve edges)** — Now that every symbol in the repo exists in the table, resolve call sites and import statements into `(from_symbol, to_symbol, edge_type)` rows. Running this as a second pass avoids missing edges where a symbol is used before, or in a different file from, where it's defined.
-5. **Persist** — Write `files`, `symbols`, and `edges` rows into SQLite. Compute and store each file's content hash for later cache invalidation.
-6. **Record metrics** — Store files-parsed, symbol count, edge count, and total duration on the `jobs`/`repos` row.
-7. **Cleanup** — Delete the cloned directory. Only the graph remains.
+2. **Clone** — `git clone --depth 1 <url> <tmp-dir>`. Shallow clone only — no history needed for structural indexing. Also record the latest commit SHA from the clone, for later use in refresh checks.
+3. **Read & hash each file** — For each source file, read its full text once: store it in `files.content`, and compute its SHA-256 into `files.hash`. This is the only point at which the raw file is ever read — both the content and the hash come from this single read.
+4. **Parse (pass 1 — collect symbols)** — Parse each file's already-read content with `web-tree-sitter`, and record every function, class, method, top-level variable, and import/export — with file path, line range, signature, and docstring/leading comment — into the `symbols` table. Don't resolve any references yet.
+5. **Parse (pass 2 — resolve edges)** — Now that every symbol in the repo exists in the table, resolve call sites and import statements into `(from_symbol, to_symbol, edge_type)` rows. Running this as a second pass avoids missing edges where a symbol is used before, or in a different file from, where it's defined.
+6. **Record metrics** — Store files-parsed, symbol count, edge count, and total duration on the `jobs`/`repos` row, along with the commit SHA from step 2 (`repos.last_commit_sha`).
+7. **Cleanup** — Delete the cloned directory. The graph, file contents, and hashes all remain in SQLite; only the raw git checkout is discarded.
 8. **Mark done** — Update the job row to `status = 'done'`.
 
 Each stage updates `jobs.progress_pct` so the frontend can show meaningful progress, not just a spinner.
+
+---
+
+## Refresh Pipeline (Incremental Re-indexing)
+
+Triggered when a user re-submits or clicks "Refresh" on an already-indexed repo:
+
+1. **Check for new commits** — Call GitHub's API for the repo's latest commit SHA; compare against the stored `repos.last_commit_sha`. If identical, stop here — nothing has changed, no clone needed.
+2. **Re-clone** — If the SHA differs, perform a fresh shallow clone, same as initial indexing.
+3. **Hash every file in the new clone** — For each file, compute its SHA-256 and compare against the existing stored `files.hash` for that path.
+4. **Re-index only changed files** — Files whose new hash matches the stored hash are left completely untouched (no re-parsing, no `symbols`/`edges` changes). Files whose hash differs (or are newly added) are re-parsed through the same two-pass pipeline above, and their old `symbols`/`edges` rows are replaced. Files that no longer exist in the new clone have their rows removed.
+5. **Update `repos.last_commit_sha`** to the new SHA, and clean up the re-clone directory.
+6. **Cache implications** — Any `cache` entry whose `source_file_hashes` references a file that just changed is now stale; the next matching query will detect the hash mismatch (see [Query Cache Strategy](#query-cache-strategy)) and fall through to a fresh retrieval automatically — no separate cache-clearing step is needed.
+
+This keeps a refresh proportional to how much of the repo actually changed since the last index, rather than redoing the full pipeline from scratch every time.
 
 ---
 
@@ -167,7 +200,7 @@ Given a user's question:
 2. **Lexical search** — query the indexed `symbols`/`files` tables directly in SQLite (`LIKE` matching for v1; FTS5 is a documented upgrade path once ranking quality needs it) against names, identifiers, and file paths. This runs entirely against indexed metadata — by the time a chat question arrives, the cloned repo no longer exists on disk, so retrieval cannot and does not shell out to the filesystem.
 3. **Candidate ranking** — rank the lexical matches (exact name match > partial match > path match) before traversal, so a question that matches several similarly-named symbols doesn't expand from all of them indiscriminately.
 4. **Graph traversal expansion** — from the top-ranked candidates, walk `edges` (callers, callees, imports) outward by a bounded number of hops to assemble a relevant subgraph.
-5. **Assemble context** — pull the stored signature/docstring (and source snippet) for the symbols/files in the resulting subgraph.
+5. **Assemble context** — for each symbol in the resulting subgraph, fetch its file's `files.content` by `file_id` and slice out exactly `line_start`–`line_end` to get the real source snippet, alongside the stored signature/docstring. The content is never searched — it's only ever fetched by ID and sliced by line range, once `symbols` has already identified where to look.
 6. **Synthesize** — only at this final step does an LLM call happen: context + question → answer, with the agent able to loop back to step 2 with a reformulated query if the Reflect node judges the context insufficient (bounded retries).
 
 No embeddings, no vector index, and no filesystem access anywhere in this path.
@@ -209,7 +242,7 @@ This gives a genuine cost/latency win on repeat questions while never silently s
 ## Project Structure
 
 ```
-root/
+ai-repo-assistant(root)/
 ├── apps/
 │   ├── web/
 │   │   └── src/
@@ -223,8 +256,9 @@ root/
 │           │   └── chat.ts        # ask question, get answer
 │           ├── indexer/
 │           │   ├── clone.ts       # ephemeral shallow clone + size check
-│           │   ├── parse.ts       # tree-sitter parsing
-│           │   └── graphBuilder.ts # symbol/edge extraction
+│           │   ├── parse.ts       # tree-sitter parsing (2-pass)
+│           │   ├── graphBuilder.ts # symbol/edge extraction
+│           │   └── refresh.ts     # commit SHA check + per-file hash diff + incremental re-index
 │           ├── retriever/
 │           │   ├── lexical.ts     # SQLite-backed lexical search (symbols/files)
 │           │   ├── ranking.ts     # candidate ranking before traversal
@@ -272,7 +306,7 @@ These are intentionally **not** part of v1. Each is a real, valuable extension, 
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/[your-username]/ai-repo-assistant.git
+git clone https://github.com/KrishnaTiwariCoder/ai-repo-assistant.git
 cd ai-repo-assistant
 pnpm install
 ```

@@ -1,5 +1,5 @@
 {
-  "name": "@repo/shared",
+  "name": "@ai-repo-assistant/shared",
   "version": "1.0.0",
   "description": "",
   "main": "dist/index.js",

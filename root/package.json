@@ -1,5 +1,5 @@
 {
-  "name": "root",
+  "name": "ai-repo-assistant",
   "private": true,
   "scripts": {
     "build": "turbo run build",

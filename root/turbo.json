@@ -6,7 +6,6 @@
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
       "outputs": [
-        "dist/**",
         ".next/**",
         "!.next/cache/**",
         "!.next/dev/**"
