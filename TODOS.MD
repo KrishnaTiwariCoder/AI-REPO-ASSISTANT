@@ -61,11 +61,11 @@ feat: submit a public repo URL, validate before cloning
 feat: shallow clone repo to temp dir, guaranteed cleanup after indexing
 ```
 
-- [ ] `git clone --depth 1 <url> <tmp-dir>` via `execa`
-- [ ] No need to read the commit SHA here — it was already fetched and stored on `repos.last_commit_sha` during `v0.3.0`, via the GitHub API rather than `git rev-parse`
-- [ ] Update `jobs.status = 'cloning'`, `progress_pct` accordingly
-- [ ] Handle clone failures (private repo, repo not found, network error) → `jobs.status = 'failed'`, store `error`
-- [ ] Guarantee temp directory deletion after parsing — even on failure (try/finally)
+- [x] `git clone --depth 1 <url> <tmp-dir>` via `execa`
+- [x] No need to read the commit SHA here — it was already fetched and stored on `repos.last_commit_sha` during `v0.3.0`, via the GitHub API rather than `git rev-parse`
+- [x] Update `jobs.status = 'cloning'`, `progress_pct` accordingly
+- [x] Handle clone failures (private repo, repo not found, network error) → `jobs.status = 'failed'`, store `error`
+- [x] Guarantee temp directory deletion after parsing — even on failure (try/finally)
 - [ ] Unit test: clone, assert temp dir exists, run cleanup, assert temp dir gone
 
 ---

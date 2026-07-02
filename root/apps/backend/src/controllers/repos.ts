@@ -3,6 +3,7 @@ import { insertJob } from "../jobs/store"
 import type { SubmitRepoResponse } from "@ai-repo-assistant/shared/"
 import { submitRepoRequestSchema } from "@ai-repo-assistant/shared"
 import { parseGithubUrl, fetchGithubRepoInfo, fetchLatestCommitSha, RepoNotFoundError } from "../utils/github"
+import { runIndexingJob } from "../jobs/runner"
 
 
 const MAX_REPO_SIZE_MB = Number(process.env.MAX_REPO_SIZE_MB ?? 200)
@@ -16,14 +17,14 @@ export const createRepoAndJob = async (c  :any) => {
         return c.json({ error: "Invalid request body", details: parseResult.error.flatten() }, 400)
     }
 
-    let repoInfo, parsedUrl;
+    let repoInfo, ownerAndName;
     
     try {
-        parsedUrl = parseGithubUrl(parseResult.data.url)
-        if (!parsedUrl) {
+        ownerAndName = parseGithubUrl(parseResult.data.url)
+        if (!ownerAndName) {
             return c.json({ error: "Invalid GitHub URL" }, 400)
         }
-        repoInfo = await fetchGithubRepoInfo(parsedUrl.owner, parsedUrl.name)
+        repoInfo = await fetchGithubRepoInfo(ownerAndName.owner, ownerAndName.name)
     } catch (err) {
         if (err instanceof RepoNotFoundError) {
             return c.json({ error: "Repository not found" }, 404)
@@ -45,13 +46,17 @@ export const createRepoAndJob = async (c  :any) => {
 
     let lastCommitSha: string
     try {
-        lastCommitSha = await fetchLatestCommitSha(parsedUrl.owner, parsedUrl.name, repoInfo.default_branch)
+        lastCommitSha = await fetchLatestCommitSha(ownerAndName.owner, ownerAndName.name, repoInfo.default_branch)
     } catch {
         return c.json({ error: "Failed to read latest commit, try again shortly" }, 502)
     }
 
     const repo = insertRepo(parseResult.data.url, sizeBytes, lastCommitSha)
-    const job = insertJob(repo.id)
+    const job = insertJob(repo.id);
+
+    runIndexingJob(repo.id, job.id, parseResult.data.url).catch((err) => {
+        console.error(`Unhandled error in indexing job ${job.id}:`, err)
+    })
 
     const response: SubmitRepoResponse = { repoId: repo.id, jobId: job.id }
     return c.json(response, 201)
