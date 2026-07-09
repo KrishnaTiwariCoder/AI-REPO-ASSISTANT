@@ -15,8 +15,12 @@ const app = new Hono().basePath('/api/v1')
 app.use(logger())
 app.use(cors())
 
+
+app.get('/', (c) => c.json({ message: 'Welcome to the API' }))
 app.route('/', router)
 
 const port = Number(process.env.PORT ?? 4000)
+
 serve({ fetch: app.fetch, port })
+
 console.log(`Backend running on http://localhost:${port}`)

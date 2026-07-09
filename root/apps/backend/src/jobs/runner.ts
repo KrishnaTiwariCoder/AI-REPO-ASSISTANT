@@ -1,4 +1,5 @@
 import { cloneRepo, cleanupClone } from "../indexer/clone"
+import { readAndHashFiles } from "../indexer/reader";
 import { setJobCloning, setJobFailed, setJobDone } from "./store"
 
 export async function runIndexingJob(
@@ -13,14 +14,15 @@ export async function runIndexingJob(
         setJobCloning(jobId);
         const result = await cloneRepo(repoUrl);
         tmpDir = result.tmpDir;
-        // here the jobs about parsing and indexing the repo would happen, but for this example, we just simulate a delay
+        
+        const files : { fileCount: number } = await readAndHashFiles(tmpDir, repoId, jobId);
+        
         await cleanupClone(tmpDir);
         tmpDir = null;
-        // Mark the job as done with some dummy stats, later will be replaced with actual stats from the indexing process
         setJobDone(jobId, {
-            files_parsed: 0,
-            symbol_count: 0,
-            edge_count: 0,
+            files_parsed: files.fileCount,
+            symbol_count: 0, 
+            edge_count: 0, 
             duration_ms: Date.now() - startedAt,
         })
     } catch (err) {

@@ -1,7 +1,7 @@
 import { insertRepo } from "../repos/store"
 import { insertJob } from "../jobs/store"
 import type { SubmitRepoResponse } from "@ai-repo-assistant/shared/"
-import { submitRepoRequestSchema } from "@ai-repo-assistant/shared"
+import { ZodSubmitRepoRequestSchema } from "@ai-repo-assistant/shared"
 import { parseGithubUrl, fetchGithubRepoInfo, fetchLatestCommitSha, RepoNotFoundError } from "../utils/github"
 import { runIndexingJob } from "../jobs/runner"
 
@@ -11,16 +11,15 @@ const MAX_REPO_SIZE_MB = Number(process.env.MAX_REPO_SIZE_MB ?? 200)
 
 export const createRepoAndJob = async (c  :any) => {
     const rawBody = await c.req.json()
-    const parseResult = submitRepoRequestSchema.safeParse(rawBody) 
-
-    if (!parseResult.success) {
-        return c.json({ error: "Invalid request body", details: parseResult.error.flatten() }, 400)
+    const zodResult = ZodSubmitRepoRequestSchema.safeParse(rawBody) 
+    if (!zodResult.success) {
+        return c.json({ error: "Invalid request body", details: zodResult.error.flatten() }, 400)
     }
 
     let repoInfo, ownerAndName;
     
     try {
-        ownerAndName = parseGithubUrl(parseResult.data.url)
+        ownerAndName = parseGithubUrl(zodResult.data.url)
         if (!ownerAndName) {
             return c.json({ error: "Invalid GitHub URL" }, 400)
         }
@@ -51,10 +50,10 @@ export const createRepoAndJob = async (c  :any) => {
         return c.json({ error: "Failed to read latest commit, try again shortly" }, 502)
     }
 
-    const repo = insertRepo(parseResult.data.url, sizeBytes, lastCommitSha)
+    const repo = insertRepo(zodResult.data.url, sizeBytes, lastCommitSha)
     const job = insertJob(repo.id);
 
-    runIndexingJob(repo.id, job.id, parseResult.data.url).catch((err) => {
+    runIndexingJob(repo.id, job.id, zodResult.data.url).catch((err) => {
         console.error(`Unhandled error in indexing job ${job.id}:`, err)
     })
 

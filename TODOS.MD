@@ -1,4 +1,4 @@
-# TODOS — AI-Repo-Assistant (Agentic Codebase Assistant)
+# TODOS — Ai-Repo-Assistant (Agentic Codebase Assistant)
 
 > Ordered roadmap. Work top-to-bottom. Each block is a logical commit or milestone.
 > Status: `[ ]` pending · `[x]` done · `[~]` in progress
@@ -66,7 +66,7 @@ feat: shallow clone repo to temp dir, guaranteed cleanup after indexing
 - [x] Update `jobs.status = 'cloning'`, `progress_pct` accordingly
 - [x] Handle clone failures (private repo, repo not found, network error) → `jobs.status = 'failed'`, store `error`
 - [x] Guarantee temp directory deletion after parsing — even on failure (try/finally)
-- [ ] Unit test: clone, assert temp dir exists, run cleanup, assert temp dir gone
+- [x] Unit test: clone, assert temp dir exists, run cleanup, assert temp dir gone
 
 ---
 
@@ -76,11 +76,11 @@ feat: shallow clone repo to temp dir, guaranteed cleanup after indexing
 feat: store full file text + content hash, before any parsing happens
 ```
 
-- [ ] Walk the cloned file tree, skip `node_modules`, `.git`, binary/non-source files
-- [ ] For each remaining file: read its full text once
-- [ ] Insert a `files` row: `path`, `content` (the full text), `hash` (SHA-256 of that text)
-- [ ] This is the **only** point where raw files are read — both pass 1 parsing (v0.5.0) and the eventual content-slicing at retrieval time (v0.10.0) reuse this stored `content`, never re-reading from disk
-- [ ] Update `jobs.progress_pct` per file read
+- [x] Walk the cloned file tree, skip `node_modules`, `.git`, binary/non-source files
+- [x] For each remaining file: read its full text once
+- [x] Insert a `files` row: `path`, `content` (the full text), `hash` (SHA-256 of that text)
+- [x] This is the **only** point where raw files are read — both pass 1 parsing (v0.5.0) and the eventual content-slicing at retrieval time (v0.10.0) reuse this stored `content`, never re-reading from disk
+- [x] Update `jobs.progress_pct` per 10 files read
 
 ---
 
@@ -116,32 +116,42 @@ feat: write collected symbols to SQLite, then resolve call/import edges
 
 ---
 
-## v0.7.0 — Job Completion & Cleanup
+## v0.7.0 — Job Completion, Cleanup & SSE Endpoint
 
 ```
-feat: finalize indexing job, delete cloned source
+feat: finalize indexing job, delete cloned source, expose SSE stream for live progress
 ```
 
 - [ ] Delete the cloned temp directory once graph extraction is complete
 - [ ] Record `duration_ms` on the `jobs` row (total time from `queued` to `done`)
 - [ ] Update `jobs.status = 'done'`, `progress_pct = 100`
 - [ ] Update `repos.status = 'ready'`
-- [ ] `GET /api/v1/jobs/:jobId` — returns current status + progress + metrics for polling
+- [ ] `GET /api/v1/jobs/:jobId/stream` — SSE endpoint using Hono's `streamSSE` helper
+  - Opens one persistent HTTP connection per job; the server pushes updates as status changes
+  - Every 500ms, reads the current `jobs` row from SQLite and emits a `job-update` event: `{ status, progressPct, error, metrics }`
+  - Loop breaks (connection closes) when `status === 'done'` or `status === 'failed'`
+  - Client never needs to send anything back — SSE is one-directional (server → client), which is exactly what job progress requires
+- [ ] `GET /api/v1/jobs/:jobId` — keep a plain REST fallback returning the current job row snapshot (useful for reconnection: client can fetch current state before opening the SSE stream, avoiding a blank progress bar on page reload)
 
 ---
 
-## v0.8.0 — Frontend: Repo Submission & Progress UI
+## v0.8.0 — Frontend: Repo Submission & Live Progress UI
 
 ```
-feat: submit-repo form and polling-based indexing progress screen
+feat: submit-repo form and SSE-powered live indexing progress screen
 ```
 
-- [ ] `apps/web` page: paste repo URL, submit
-- [ ] On submit, call `POST /api/v1/repos`, store `repoId`/`jobId`
-- [ ] Progress screen: poll `GET /api/v1/jobs/:jobId` every 1-2s
-- [ ] Render stage labels (Cloning → Parsing → Indexing → Done) with `progress_pct`
-- [ ] On `status: 'done'` → redirect to chat screen for that repo
-- [ ] On `status: 'failed'` → show error message, allow retry
+- [ ] `apps/web` page: paste repo URL, submit button
+- [ ] On submit, call `POST /api/v1/repos`, receive `{ repoId, jobId }`
+- [ ] Before opening SSE stream: fetch `GET /api/v1/jobs/:jobId` once to get the current state (handles page reload gracefully — user sees current progress immediately, not a blank bar)
+- [ ] Open `EventSource` to `GET /api/v1/jobs/:jobId/stream`
+- [ ] On each `job-update` event: update progress bar + stage label in real time
+  - Stage labels: Queued → Cloning → Parsing → Indexing → Done
+  - `progressPct` drives the progress bar width
+- [ ] On `status: 'done'` event: close the `EventSource`, redirect to chat screen for that repo
+- [ ] On `status: 'failed'` event: close the `EventSource`, show error message, allow resubmit
+- [ ] `useJobStream` hook encapsulates the `EventSource` lifecycle (open on mount, close on unmount/done/failed) so the progress page component stays clean
+- [ ] No polling anywhere — the `EventSource` connection is persistent and receives pushes from the server the moment job status changes
 
 ---
 

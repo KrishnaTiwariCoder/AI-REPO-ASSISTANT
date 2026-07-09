@@ -1,4 +1,4 @@
-# AI-Repo-Assistant — Agentic Codebase Assistant
+# Ai-Repo-Assistant — Agentic Codebase Assistant
 
 > Paste a public GitHub repo URL, watch it get indexed into a structural code graph, then chat with an assistant that actually understands your codebase — no embeddings, no vector DB, just deterministic lexical + graph-traversal retrieval feeding an LLM.
 
@@ -30,8 +30,12 @@ Client (Next.js + TypeScript)
         │
         ├── HTTP REST ──────────────► Hono API Server ◄──── SQLite
         │   (submit/refresh repo,              │              (jobs, files+content,
-        │    poll job, chat)                   │               symbols, edges, cache,
+        │    chat, job snapshot)               │               symbols, edges, cache,
         │                                      │               eval results)
+        ├── SSE stream ─────────────► GET /jobs/:id/stream
+        │   (live job progress,                 │
+        │    server pushes updates,             │
+        │    client only listens)               │
         │                                      │
         │                              Indexing Pipeline
         │                              ├── Ephemeral shallow clone
@@ -72,7 +76,11 @@ Client (Next.js + TypeScript)
 
 **Refreshing a repo re-indexes only what changed.** Re-submitting an already-indexed repo (a "Refresh" action) first checks the latest commit SHA via GitHub's API against `repos.last_commit_sha`. If unchanged, nothing happens — no re-clone needed. If changed, the repo is re-cloned and each file's freshly computed hash is compared against its stored `files.hash`: only files whose hash differs are re-parsed and have their symbols/edges rebuilt; unchanged files are left untouched. This makes "refresh" proportional to how much of the repo actually changed, not a full from-scratch re-index every time.
 
-**Indexing is a background job, not a blocking request.** Submitting a repo returns a `job_id` immediately. A `jobs` table in SQLite tracks `status` (queued → cloning → parsing → indexing → done/failed) and `progress_pct`. The frontend polls for status and renders progress. No external queue/worker infra in v1 — see [v2 Roadmap](#v2-roadmap-deferred-scope) for Redis + BullMQ.
+**Job progress is delivered via Server-Sent Events (SSE), not polling.** The `GET /jobs/:jobId/stream` endpoint uses Hono's `streamSSE` helper to hold a single persistent HTTP connection open per job. The server reads the `jobs` row from SQLite every 500ms and pushes a `job-update` event to the client the moment status changes — the client never has to ask again. The connection closes automatically once the job reaches `done` or `failed`. A plain REST fallback (`GET /jobs/:jobId`) is kept alongside for reconnection: when a user reloads the progress page mid-indexing, the frontend fetches the current job state once before opening the SSE stream, so there's never a blank progress bar on reload.
+
+SSE is the correct fit here because job progress is **strictly one-directional** (server tells the client what's happening, the client never needs to reply over that same connection) — WebSockets would be bidirectional overhead for a one-way problem. Kafka and Redis pub/sub were also considered and rejected: Kafka is a distributed streaming platform for high-throughput multi-service architectures, not a job-progress notification mechanism; Redis pub/sub would require Redis as a separate infrastructure dependency for a problem SSE already solves over a plain HTTP connection with no extra dependencies.
+
+**Indexing is a background job, not a blocking request.** Submitting a repo returns a `{ repoId, jobId }` immediately. A `jobs` table in SQLite tracks `status` (queued → cloning → parsing → indexing → done/failed) and `progress_pct`, updated by the runner as each pipeline stage completes. No external queue/worker infra in v1 — see [v2 Roadmap](#v2-roadmap-deferred-scope) for Redis + BullMQ when concurrent indexing load actually requires it.
 
 **The query cache is structured data, not Markdown.** Cached answers live in a SQLite table, keyed by a normalized query plus the repo's current state. Each cache entry stores `source_file_hashes` — if the repo has been re-indexed since the entry was cached, the entry is invalidated rather than served stale.
 
@@ -96,7 +104,8 @@ Client (Next.js + TypeScript)
 - Per-symbol docstring/leading-comment capture alongside signature
 - Background job with live status (`queued` → `cloning` → `parsing` → `indexing` → `done`/`failed`)
 - Indexing metrics captured per job (files parsed, symbol count, edge count, duration)
-- Polling-based progress UI, no page refresh needed
+- **SSE-powered live progress UI** — `GET /jobs/:jobId/stream` holds a persistent HTTP connection, server pushes `job-update` events every time status changes, connection closes automatically on completion; no polling, no repeated HTTP requests from the client
+- Plain REST snapshot endpoint (`GET /jobs/:jobId`) kept alongside SSE for reconnection — client fetches current state once before opening the stream, so a page reload mid-indexing never shows a blank progress bar
 - **Refresh repo** action: checks the latest commit SHA via GitHub API; if changed, re-clones and re-hashes each file, re-parsing only files whose hash actually differs from what's stored
 
 ### Chat / Q&A
@@ -127,6 +136,7 @@ Client (Next.js + TypeScript)
 | Monorepo | TurboRepo | Shared types, build caching, parallel task execution |
 | Frontend | Next.js + TypeScript | File-based routing, minimal config for the submit/progress/chat flows |
 | Backend | Hono + TypeScript | Lightweight, fully TS-native, runs as a standalone long-lived Node process (required for background jobs and native modules — not a fit for serverless/edge runtimes) |
+| Job progress delivery | Hono `streamSSE` (SSE) | Server pushes job status to client over one persistent HTTP connection — no polling, no WebSockets, no extra dependencies |
 | Parsing | `web-tree-sitter` (WASM) | Cross-platform grammar loading without native build toolchain issues |
 | Indexing-time file search | ripgrep (via `execa`) | Used only while the clone still exists on disk, during indexing — never at chat/retrieval time |
 | Query-time lexical search | SQLite `LIKE` (FTS5 later) | Runs directly against indexed `symbols`/`files` tables; works after the clone has been deleted |
@@ -140,19 +150,19 @@ Client (Next.js + TypeScript)
 
 ### Frontend (`apps/web`)
 
-**`next`** — Server actions handle repo submission and job-status polling without a separate API client layer; file-based routing keeps the chat and submission flows simple.
+**`next`** — File-based routing keeps the submit, progress, and chat flows simple. The progress page connects to the backend's SSE stream via the browser's native `EventSource` API — no extra client library needed.
 
 **`typescript`** — Shared types for job status, chat messages, and API responses come from `packages/shared`.
 
 ### Backend (`apps/backend`)
 
-**`hono`** — REST endpoints: submit repo, poll job, send chat message. Runs as a standalone Node process (not serverless), which is required for long-running background jobs, native modules, and subprocess spawning.
+**`hono`** — REST endpoints (submit repo, chat) plus the SSE stream endpoint (`GET /jobs/:jobId/stream`) via Hono's built-in `streamSSE` helper. Runs as a standalone Node process (not serverless), which is required for long-running background jobs, native modules, and subprocess spawning.
 
 **`web-tree-sitter`** — Parses source files into ASTs across languages via WASM grammars; the basis for symbol/edge extraction. Runs in two passes per repo: symbol collection, then edge resolution.
 
 **`execa`** — Runs `git clone` and `ripgrep` as subprocesses, used only during the indexing stage while the clone still exists on disk. Never invoked during chat/retrieval — by that point the clone has already been deleted.
 
-**`better-sqlite3`** — Synchronous SQLite driver. Fast enough for this workload (no async overhead needed on local file-based queries) and simplifies the job-polling, lexical-search, and cache-lookup code paths.
+**`better-sqlite3`** — Synchronous SQLite driver. Fast enough for this workload (no async overhead needed on local file-based queries) and simplifies the job-status reads inside the SSE loop, lexical-search, and cache-lookup code paths.
 
 **`@langchain/langgraph`** — Defines the agent as an explicit graph of nodes (Plan, Retrieve, Reflect, Synthesize, Verify) with conditional edges for retry loops, rather than a single linear prompt chain.
 
@@ -165,11 +175,11 @@ Client (Next.js + TypeScript)
 ## Indexing Pipeline
 
 1. **Validate** — Check the repo exists via GitHub API; check `size` field against a configured cap (e.g. 200MB); reject early if too large.
-2. **Clone** — `git clone --depth 1 <url> <tmp-dir>`. Shallow clone only — no history needed for structural indexing. Also record the latest commit SHA from the clone, for later use in refresh checks.
+2. **Clone** — `git clone --depth 1 <url> <tmp-dir>`. Shallow clone only — no history needed for structural indexing. The latest commit SHA was already fetched and stored at submission time (`v0.3.0`) via the GitHub API — no `git rev-parse` needed here.
 3. **Read & hash each file** — For each source file, read its full text once: store it in `files.content`, and compute its SHA-256 into `files.hash`. This is the only point at which the raw file is ever read — both the content and the hash come from this single read.
 4. **Parse (pass 1 — collect symbols)** — Parse each file's already-read content with `web-tree-sitter`, and record every function, class, method, top-level variable, and import/export — with file path, line range, signature, and docstring/leading comment — into the `symbols` table. Don't resolve any references yet.
 5. **Parse (pass 2 — resolve edges)** — Now that every symbol in the repo exists in the table, resolve call sites and import statements into `(from_symbol, to_symbol, edge_type)` rows. Running this as a second pass avoids missing edges where a symbol is used before, or in a different file from, where it's defined.
-6. **Record metrics** — Store files-parsed, symbol count, edge count, and total duration on the `jobs`/`repos` row, along with the commit SHA from step 2 (`repos.last_commit_sha`).
+6. **Record metrics** — Store files-parsed, symbol count, edge count, and total duration on the `jobs` row.
 7. **Cleanup** — Delete the cloned directory. The graph, file contents, and hashes all remain in SQLite; only the raw git checkout is discarded.
 8. **Mark done** — Update the job row to `status = 'done'`.
 
@@ -242,13 +252,13 @@ This gives a genuine cost/latency win on repeat questions while never silently s
 ## Project Structure
 
 ```
-ai-repo-assistant(root)/
+ai-repo-assistant (root)/
 ├── apps/
 │   ├── web/
 │   │   └── src/
 │   │       ├── app/              # Next.js routes: submit, job status, chat
 │   │       ├── components/       # Repo submit form, progress bar, chat panel
-│   │       └── hooks/            # useJobStatus (polling), useChat
+│   │       └── hooks/            # useJobStream (SSE), useChat
 │   └── backend/
 │       └── src/
 │           ├── routes/

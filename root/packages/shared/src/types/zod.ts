@@ -1,10 +1,10 @@
 import { z } from "zod"
 
-export const submitRepoRequestSchema = z.object({
+export const ZodSubmitRepoRequestSchema = z.object({
   url: z.url(),
 })
 
-export const githubRepoResponseSchema = z.object({
+export const ZodGithubRepoResponseSchema = z.object({
   owner: z.object({ login: z.string() }),
   name: z.string(),
   size: z.number(),
@@ -12,6 +12,6 @@ export const githubRepoResponseSchema = z.object({
   private: z.boolean(),
 })
 
-export type GithubRepoResponse = z.infer<typeof githubRepoResponseSchema> 
+export type ZodGithubRepoResponse = z.infer<typeof ZodGithubRepoResponseSchema> 
 
-export type SubmitRepoRequest = z.infer<typeof submitRepoRequestSchema>
+export type ZodSubmitRepoRequest = z.infer<typeof ZodSubmitRepoRequestSchema>
