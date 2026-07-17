@@ -35,9 +35,20 @@ export function insertFiles(
 
     const insertAll = db.transaction(
         (rows: Array<{ path: string; content: string; hash: string }>) => {
+            const inserted: FileRecord[] = []
+
             for (const row of rows) {
-                insert.run(randomUUID(), repoId, row.path, row.content, row.hash)
+                const file: FileRecord = {
+                    id: randomUUID(),
+                    repo_id: repoId,
+                    path: row.path,
+                    content: row.content,
+                    hash: row.hash,
+                }
+                insert.run(file.id, file.repo_id, file.path, file.content, file.hash)
+                inserted.push(file)
             }
+            return inserted
         }
     )
 

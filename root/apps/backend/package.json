@@ -9,8 +9,8 @@
     "build": "tsc -b",
     "start": "node dist/index.js",
     "dev": "node dist/index.js",
-    "test":"vitest run",
-    "test:watch":"vitest"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [],
   "author": "",
@@ -23,6 +23,8 @@
     "dotenv": "^17.4.2",
     "execa": "^9.6.1",
     "hono": "^4.12.27",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.26.11",
     "zod": "^4.4.3"
   },
   "devDependencies": {

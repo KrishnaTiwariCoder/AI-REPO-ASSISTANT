@@ -55,8 +55,8 @@ export async function readAndHashFiles(
         const hash = hashContent(content)
         batch.push({ path: relativePath, content, hash })
 
-        if (i % 10 === 0 || i === total - 1) {
-            const pct = Math.round(10 + ((i + 1) / total) * 20)
+        if (i % 10 === 0 || i === total) {   
+            const pct = Math.round(10 + (i / total) * 20) 
             updateJob(jobId, { progress_pct: pct })
         }
     }
